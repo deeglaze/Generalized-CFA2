@@ -41,27 +41,28 @@ t
     [--> ((e_0 e ...) σ κ) (e_0 σ (push (e ...) () κ))]
     ;; tail call
     [--> ((tail (e_0 e ...)) σ κ) (e_0 σ (goto (e ...) () κ))]
-    ;; argument evaluation
-    [--> ((λ () e) σ (goto () () κ)) (e σ κ)]
-    [--> ((λ () e) σ (push () () κ)) (e σ (return () κ))]
-    ;; at least one more tail call argument to evaluate afterwards.
-    [--> (v σ (goto (e_1 e_2 e ...) (v_0 ...) κ)) (e_1 σ (goto (e_2 e ...) (v_0 ... v) κ))]
-    ;; last argument before exiting with a tail call
-    [--> (v σ (goto (e) (v_0 ...) κ)) (e σ (exit-tc (v_0 ... v) κ))]
-    [--> (v σ (push (e_1 e ...) (v_0 ...) κ)) (e_1 σ (push (e ...) (v_0 ... v) κ))]
+    ;; thunks
+    [--> ((λ () e) σ (goto () () κ)) ((λ () e) σ (exit-tc ()))]
+    [--> ((λ () e) σ (push () () κ)) ((λ () e) σ (exit ()))]
+    [--> (v σ (fncall (e_1 e ...) (v_0 ...) κ))
+         (e_1 σ (fncall (e ...) (v_0 ... v) κ))]
+    ;; call
+    [--> (v_n σ (push () (v ...) κ)) (v_n σ (exit (v ...)))]
+    [--> (v_n σ (goto () (v ...) κ)) (v_n σ (exit-tc (v ...)))]
     ;; entry
-    [--> (name ς (v_n σ (push () ((λ (x ..._ids x_n) e) v ..._ids) κ)))
+    [--> (v_n σ (exit ((λ (x ..._ids x_n) e) v ..._ids)))
          ((tail e)
           ,((combine-stores) (term σ) (term σ*))
-          ,(κ-update 'push (term κ) (term ρ*)))
+          (return ρ*))
          (where (σ* ρ*) ,(color (term ς) (term ((x v) ... (x_n v_n)))))]
-    ;; Exit-CEval
-    [--> (v σ (return ρ κ)) (v σ κ)]
-    [--> (v_n σ (exit-tc ((λ (x ..._ids x_n) e) v ..._ids) κ))
+    ;; tail call entry
+    [--> (v_n σ (exit-tc ((λ (x ..._ids x_n) e) v ..._ids)))
          ((tail e)
           ,((combine-stores) (term σ) (term σ*))
-          ,(κ-update 'goto (term κ) (term ρ*)))
+          (exit-tc ρ*)) ;; FIXME
          (where (σ* ρ*) ,(color (term ς) (term ((x v) ... (x_n v_n)))))]
+    ;; entry thunk
+    [--> ((λ () e) σ (exit ())) ((tail e) σ (return ()))]
     ;; primop evaluation
     [--> ((if-zero e_0 e_1 e_2) σ κ) (e_0 σ (select e_1 e_2 κ))]
     [--> ((tail (if-zero e_0 e_1 e_2)) σ κ) (e_0 σ (select (tail e_1) (tail e_2) κ))]
@@ -76,13 +77,11 @@ t
   [(CŜK->CŜK̃ (any σ κ)) (any σ (α̃κ κ))])
 (define-metafunction CŜK
   [(α̃κ halt) halt]
-  [(α̃κ (return ρ κ)) (return ρ (α̃κ κ))]
-  [(α̃κ (tail () (v ...) κ)) (exit-tc (v ...) κ)]
+  [(α̃κ (return ρ κ)) (return ρ)]
+  [(α̃κ (tail () (v ...) κ)) (exit-tc (v ...))]
   [(α̃κ (tail (e_1 e ...) (v ...) κ)) (goto (e_1 e ...) (v ...) (α̃κ κ))]
-  [(α̃κ (push (e ...) (v ...) κ)) (push (e ...) (v ...) (α̃κ κ))])
-(define-metafunction CŜK
-  [(top-ρ (fncall (e ...) (v ...) κ)) (top-ρ κ)]
-  [(top-ρ (return ρ κ)) ρ])
+  [(α̃κ (push () (v ...) κ)) (exit (v ...))]
+  [(α̃κ (push (e_1 e ...) (v ...) κ)) (push (e_1 e ...) (v ...) (α̃κ κ))])
 (define-metafunction CSK
   [(CSK->CŜK̃ ς) (CŜK->CŜK̃ (CSK->CŜK ς))])
 
@@ -116,7 +115,11 @@ t
                                          [any #f]))
 |#
   (define (Update! ς̃₁ ς̃₂ ς̃₃ ς̃₄)
-    (printf "Update! ~a~%~a~%~a~%~a~%" ς̃₁ ς̃₂ ς̃₃ ς̃₄))
+    (term-let ([(v_n1 σ_1 (exit (v_1 ...))) ς̃₁]
+               [(v_n2 σ_2 (push () (v_2 ...) κ_2)) ς̃₂]
+               [(v_n3 σ_3 (exit (v_3 ...))) ς̃₃]
+               [(v_n4 σ_4 (return ρ)) ς̃₄])
+      (Propagate! ς̃₁ (term (v_n4 σ_4 κ_2)))))
   (define (Propagate! ς̃₁ ς̃₂)
     (define pair (list ς̃₁ ς̃₂))
 ;    (printf "Propagate! ~a~%~a~%" ς̃₁ ς̃₂)
@@ -152,10 +155,10 @@ t
            (for ([ς̃₃ (in-list (succ ς̃₂))])
              (Propagate! ς̃₁ ς̃₃))]
 
-          [(v σ (return ρ halt)) ;; final state
+          [(v σ halt) ;; final state
            (hash-set! Final ς̃₂ #t)]
 
-          [(v σ (return ρ κ)) ;; exit/inner return
+          [(v σ (return ρ)) ;; exit/inner return
            (begin
              (hash-set! Summary ς̃₁ ς̃₂)
              (for ([(ς̃₃ caller×callee) (in-dict Callers)]
@@ -165,8 +168,8 @@ t
                    #:when (equal? ς̃₁ (second caller×callee)))
                (Propagate! ς̃₃ (first caller×callee))))]
 
-          [(v σ (exit-tc (v_0 ...) κ))
-           (for ([ς̃₃ (in-list (succ ς̃₂))])
+          [(v σ (exit-tc (v_0 ...)))
+           (for ([ς̃₃ (in-list (succ ς̃₂))]) ;; tails have no successor in local semantics!
              (Propagate! ς̃₃ ς̃₃)
              (hash-set! TCallers ς̃₁ (list ς̃₂ ς̃₃))
              (printf "Looking for ~a...~%" ς̃₃)
@@ -216,3 +219,16 @@ t
 ;(redex-match CŜK (name ς (v_n σ (fncall () ((λ (x ..._ids x_n) e) v ..._ids) κ))) t*)
 ;(CŜK̃-traces t)
 (CFA2 t)
+
+(define R (R-CŜK̃))
+
+#;
+(redex-match CŜK̃ (v σ any)
+             '((λ (g1508) (f1506 (λ (g1504 g1505) ((g1508 g1508) g1504 g1505))))
+               ((f1506 (λ (fact) (λ (n acc) (if-zero n acc (fact (- n 1) (* n acc)))))))
+               (goto () ((λ (t1507) (t1507 t1507))) (return ()))))
+
+(apply-reduction-relation* R
+ '((λ (g1508) (f1506 (λ (g1504 g1505) ((g1508 g1508) g1504 g1505))))
+   ((f1506 (λ (fact) (λ (n acc) (if-zero n acc (fact (- n 1) (* n acc)))))))
+   (exit-tc ((λ (t1507) (t1507 t1507))))))
