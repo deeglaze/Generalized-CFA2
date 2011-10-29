@@ -7,6 +7,7 @@
   [e (e e ...) x lam non-essential]
   [lam (λ (x ...) e)]
   [(x y z) variable-not-otherwise-mentioned]
+  ;; nicety bits
   [non-essential (if-zero e e e) literal primop]
   [primop + - * = sub1]
   [literal integer])
@@ -33,16 +34,17 @@
      (return ρ κ)])
 ;; abstract
 (define-extended-language CŜK CSK
+  [tailx x (tail x)]
   [σ ((x v v ...) ...)]
   [v lam c primop] ;; closures are all blended in the heap
+  [tailv v (tail v)]
   [c abs-int])
 ;; local
 (define-extended-language CŜK̃ CŜK
   [κ halt
-     (push (e ...) (v ...) κ)
-     (goto (e e ...) (v ...) κ)
-     (exit-tc (v ...) κ)
-     (return ρ κ)
+     (fncall (e ...) (v ...) κ)
+     (exit (v ...))
+     (return ρ)
      (select d d κ)])
 
 (define undef (λ _ (error "Not yet defined")))
@@ -57,14 +59,20 @@
 (define abstract? (make-parameter #f))
 (define local? (make-parameter #f))
 
+
+(define node-names (make-parameter #f))
 ;; syntactic escape analysis
 (define (create-Stack t)
+  (node-names (make-hash))
+  (define name (box 0))
   (define maxcount (make-hasheq))
   (define (update! t new) (hash-set! maxcount t (max new (hash-ref maxcount t 0))))
   (define (dict-set-many dict keys v)
     (for/fold ([dict dict]) ([k (in-list keys)]) (dict-set dict k v)))
   (define t*
     (let loop ([t t] [d 0] [count #hasheq()])
+      (hash-set! (node-names) t (unbox name))
+      (set-box! name (add1 (unbox name)))
       (match t
         [(? integer?) (void)]
         [(? symbol?)
@@ -109,24 +117,25 @@
 (define (find-first-in-cont κ x)
   (match κ
     [`(return ,ρ ,κ) (first (dict-ref ρ x))]
+    [`(return ,ρ) (first (dict-ref ρ x))]
     [`(,fncall ,es ,vs ,κ) (find-first-in-cont κ x)]
-    [`(exit ,ρ) (first (dict-ref ρ x))]
-    [`(exit-tc ,vs ,κ) (find-first-in-cont κ x)]))
+    [`(exit ,ρ) (first (dict-ref ρ x))]))
 
 ;; metafunctions common to all languages:
 (define (κ-update kind κ ρ)
   (case kind
     [(push) `(return ,ρ ,κ)]
-    [(goto) (mutate-top-return κ ρ)]))
+    [(goto) (mutate-top-return κ ρ)]
+    [else (error 'κ-update "Unknown kind ~a~%" kind)]))
 
 (define (mutate-top-return κ ρ)
   (match κ
     [`(push ,es ,vs ,κ) `(push ,es ,vs ,(mutate-top-return κ ρ))]
     [`(goto ,es ,vs ,κ) `(push ,es ,vs ,(mutate-top-return κ ρ))]
     [`(return ,ρ* ,κ) `(return ,(env-mutate ρ* ρ) ,κ)]
+    [`(return ,ρ*) `(return ,(env-mutate ρ* ρ))]
     [`(select ,d1 ,d2 ,κ) `(select ,d1 ,d2 ,(mutate-top-return κ ρ))]
     [`(exit ,ρ*) `(exit ,(env-mutate ρ* ρ))]
-    [`(exit-tc ,vs ,κ) `(exit-tc ,vs ,(mutate-top-return κ ρ))]
     [_ κ]))
 
 (define (color ς ρ) (color-aux ς ρ '() '()))
