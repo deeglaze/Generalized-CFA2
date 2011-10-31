@@ -38,13 +38,13 @@
   [σ ((x v v ...) ...)]
   [v lam c primop] ;; closures are all blended in the heap
   [tailv v (tail v)]
-  [c abs-int])
+  [c integer])
 ;; local
 (define-extended-language CŜK̃ CŜK
-  [κ halt
-     (fncall (e ...) (v ...) κ)
-     (exit (v ...))
+  [κ (fncall (e ...) (tailv ...) κ)
+     (exit (tailv ...))
      (return ρ)
+     (halt ρ) ;; final return
      (select d d κ)])
 
 (define undef (λ _ (error "Not yet defined")))
@@ -59,8 +59,40 @@
 (define abstract? (make-parameter #f))
 (define local? (make-parameter #f))
 
-
+;;; For more compact presentation
 (define node-names (make-parameter #f))
+(define (name-ς ς)
+  (list (name-term (first ς)) (name-σ (second ς)) (name-κ (third ς))))
+
+(define (name-term tm)
+  (define t ((term-match/single CŜK̃
+               [v (term v)]
+               [(tail v) (term v)]
+               [literal (term literal)]
+               [(name t (e_0 e ...)) (term t)]
+               [(name t (tail (e_0 e ...))) (term t)]
+               [(name t (if-zero e_0 e_1 e_2)) (term t)]
+               [(name t (tail (if-zero e_0 e_1 e_2))) (term t)]
+               [x (term x)]
+               [(tail x) (term x)]
+               [any (error 'name-term "WTF ~a" tm)]) tm))
+  (hash-ref (node-names) t `(??? ,t)))
+(define (name-σ σ)
+  (for/list ([kv (in-list σ)]) (cons (first kv) (map name-term (rest kv)))))
+(define (name-κ κ)
+  ((term-match/single CŜK̃
+     [(exit (tailv ...)) (term (exit ,(map name-term (term (tailv ...)))))]
+     [(return ρ) (term (return ,(name-σ (term ρ))))]
+     [(halt ρ) (term (halt ,(name-σ (term ρ))))]
+     [(fncall (e ...) (tailv ...) κ)
+      (term (fncall ,(map name-term (term (e ...)))
+                    ,(map name-term (term (tailv ...)))
+                    ,(name-κ (term κ))))]
+     [(select d_1 d_2 κ)
+      (term (select ,(name-term (term d_1)) ,(name-term (term d_2)) ,(name-κ (term κ))))]
+     [any (error 'name-κ "WTF ~a" κ)])
+   κ))
+
 ;; syntactic escape analysis
 (define (create-Stack t)
   (node-names (make-hash))
@@ -136,6 +168,7 @@
     [`(return ,ρ*) `(return ,(env-mutate ρ* ρ))]
     [`(select ,d1 ,d2 ,κ) `(select ,d1 ,d2 ,(mutate-top-return κ ρ))]
     [`(exit ,ρ*) `(exit ,(env-mutate ρ* ρ))]
+    [`(halt ,ρ*) `(halt ,(env-mutate ρ* ρ))]
     [_ κ]))
 
 (define (color ς ρ) (color-aux ς ρ '() '()))
