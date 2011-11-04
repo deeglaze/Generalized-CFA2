@@ -15,41 +15,44 @@
 
 (define-language Scheme
   [e (e e ...) ref lam
-     (if e e e) (qwote c)
-     #;(call/cc e)
-     #;(set! ref e)]
+     (if e e e) const
+     #;(call/cc e) #;(set! ref e)]
   [ref x]
+  [const (qwote c)]
   [lam (λ (x ...) e)]
   [c integer void bool null (cons-cell c c)] ;; simplified
   [bool #t #f]
   [x variable-not-otherwise-mentioned])
 (define-extended-language Annotated-Scheme Scheme
-  [ref (ann-ref x bool scope-depth) primop] ;; bool ⇔ stack reference.
+  [ref (ann-ref x bool scope-depth) ;; bool ⇔ stack reference.
+       (alloc-point natural allocation-primop) ;; label each allocation point in the program
+       primop]
+  [const (qwote natural c)] ;; label the textual constant
   [lam (λ scope-depth (x ...) e)] ;; scope-depth is static nesting depth of x.
   [scope-depth natural]
-  [primop + - * / pair? null? < <= = >= > cons car cdr])
+  [allocation-primop cons]
+  [primop + - * / pair? null? < <= = >= > car cdr])
 
 (define-extended-language Istack Annotated-Scheme
   [ς ς-eval ς-apply]
   [d e (tail e)]
   [ς-eval (d ρ σ Ξ D scope-depth κ)]
   [ς-apply (v σ Ξ D κ)]
-  [v primop c (clo lam ρ) (kont κ Ξ D)]
+  [v primop allocation-primop c (clo lam ρ) (kont κ Ξ D)]
   [ρ ((x ℓ) ...)]
-  [σ ((natural v v ...) ...)]
+  [σ ((any v) ...)]
   [(D Ξ) (ξ ...)] ;; stacks are lists of stack frames
   [ξ (v ...)] ;; stack frames are referenced positionally
-  [ℓ (Stack natural) (Heap/Stack natural natural)]
+  [ℓ (Stack natural) (Heap/Stack any natural)]
   [call push goto]
   [capture push-capture goto-capture]
   [κ halt
-     truncated ;; for localization
      ;; returning to nesting depth natural. Update display on exit.
      (exit scope-depth κ)
      (call (e ...) (v ...) ρ scope-depth κ)
      (entry (v ...) scope-depth κ)
      (select d d ρ scope-depth κ)
-     (capture scope-depth κ)
+     #;(capture scope-depth κ)
      #;(assign ℓ natural κ)]
   ;; give names to certain configurations for understandable metafunctions
   [colorable ς-exit-tc ς-entry #;ς-call/cc]
@@ -64,33 +67,34 @@
                         (v σ Ξ D (call () (primop v ...) ρ scope-depth κ))
                         (v σ Ξ D (select d d ρ scope-depth κ))]
 #;[ς-call/cc ((clo (λ scope-depth (x) e) ρ) σ Ξ D (capture scope-depth κ))]
-  [ς-use/cc (v σ Ξ D (call () ((kont κ Ξ D)) ρ scope-depth κ))]
+#;[ς-use/cc (v σ Ξ D (call () ((kont κ Ξ D)) ρ scope-depth κ))]
   [push-kind push #;push-capture]
   [exit-kind goto #;goto-capture])
+(define-extended-language Îstack Istack
+  [σ ((natural v v ...) ...)]
+  [c bottom top integer void abs-bool bool null (cons-cell c c)])
+(define-extended-language Ĩstack Îstack
+  [κ .... truncated])
+
 (define-syntax-rule (is-state? pattern term)
   (not (not (redex-match Istack pattern term))))
 
 ;; These three meta-functions are the only ones needed to abstract
-#;(define-metafunction Istack ;; heap allocation
+(define-metafunction Istack ;; heap allocation
   [(alloc (v σ Ξ D κ) (natural ...))
    ,(add1 (max (max-nat-keys (term σ)) (max-nat-list (term (natural ...)))))])
 
-(define monovariance (make-parameter #f))
-(define var-count (make-parameter #f))
-(define (ref-bump x)
-  (dict-ref (monovariance) x (λ _ (define c (var-count)) (var-count (add1 c)) c)))
-
-(define-metafunction Istack
+(define-metafunction Îstack
   [(alloc ((clo (λ scope-depth (x ..._i) e) ρ) σ Ξ D (entry (v ..._i) scope-depth_unused κ))
-          (natural ...))
-   ,(ref-bump (list-ref (term (x ...)) (length (term (natural ...)))))]
+          (any ...))
+   ,(list-ref (term (x ...)) (length (term (any ...))))]
   [(alloc (v_n σ Ξ D (goto () ((clo (λ scope-depth (x ..._i x_n) e) ρ) v ..._i) ρ_unused scope-depth_unused κ))
-          (natural ...))
-   ,(ref-bump (list-ref (term (x ... x_n)) (length (term (natural ...)))))])
+          (any ...))
+   ,(list-ref (term (x ... x_n)) (length (term (any ...))))])
 
 #;(define-metafunction Istack ;; we want stack locations to be mutated
     [(combine-stores σ_1 σ_2) ,(for/fold ([ret (term σ_1)]) ([(k vs) (in-dict (term σ_2))]) (dict-set ret k vs))])
-(define-metafunction Istack ;; we want stack locations to be mutated
+(define-metafunction Îstack ;; we want stack locations to be mutated
   [(combine-stores σ_1 σ_2)
    ,(for/fold ([ret (term σ_1)])
         ([(k vs) (in-dict (term σ_2))])
@@ -145,10 +149,18 @@
 (define-metafunction Istack
   [(update-display D scope-depth ξ) ,(list-update (term D) (term scope-depth) (term ξ))])
 
+#|
 (define-metafunction Istack
   [(Ξ-pop (ξ_top ξ ...)) (ξ ...)])
 (define-metafunction Istack
   [(Ξ-push ξ (ξ_stack ...)) (ξ ξ_stack ...)])
+|#
+(define-metafunction Istack
+  [(Ξ-pop (ξ_top ξ ...)) ()])
+(define-metafunction Istack
+  [(Ξ-push ξ (ξ_stack ...)) (ξ)])
+
+
 (define-metafunction Istack
   [(pop-necessarily push-kind Ξ) Ξ]
   [(pop-necessarily goto-kind Ξ) (Ξ-pop Ξ)])
@@ -167,7 +179,10 @@
    ((tail e)
     (env-extend* ρ (x ... x_n) (ℓ_all ...))
     (combine-stores σ σ_new)
-    (Ξ-push ξ (Ξ-pop Ξ)) (update-display D scope-depth ξ) scope-depth κ)
+    (Ξ-push ξ (Ξ-pop Ξ))
+    (update-display D scope-depth ξ)
+    scope-depth
+    κ)
    (where ξ (v ... v_n))
    (where ((ℓ_all ...) σ_new) (color-alloc ς ((x v) ... (x_n v_n))))]
   ;; entry
@@ -175,7 +190,10 @@
    ((tail e)
     (env-extend* ρ (x ...) (ℓ_all ...))
     (combine-stores σ σ_new)
-    (Ξ-push ξ Ξ) (update-display D scope-depth ξ) scope-depth (exit scope-depth_current κ))
+    (Ξ-push ξ Ξ)
+    (update-display D scope-depth ξ)
+    scope-depth
+    (exit scope-depth_current κ))
    (where ξ (v ...))
    (where ((ℓ_all ...) σ_new) (color-alloc ς ((x v) ...)))]
   ;; call/cc
@@ -291,7 +309,8 @@
   (define-values (Final Work) (values (make-hasheq) (make-hasheq)))
   (define (Update! ς̃₁ ς̃₂ ς̃₃ ς̃₄)
     (apply printf "Updating ~%〈~a,~% ~a,~% ~a,~% ~a〉~%" (map name-ς (list ς̃₁ ς̃₂ ς̃₃ ς̃₄)))
-    (term-let (#;[(v_1 σ_1 Ξ_1 D_1 (entry (v_i1 ...) scope-depth_1 truncated)) ς̃₁]
+    (redex-let Istack
+              (#;[(v_1 σ_1 Ξ_1 D_1 (entry (v_i1 ...) scope-depth_1 truncated)) ς̃₁]
                [(v_n σ_2 Ξ_2 D_2 (push () (v_i2 ...) ρ_2 scope-depth_2 κ_2)) ς̃₂]
                [(v_3 σ_3 Ξ_3 D_3 (entry (v_i3 ...) scope-depth_3 truncated)) ς̃₃]
                [(v_4 σ_4 Ξ_4 D_4 (exit scope-depth_4 truncated)) ς̃₄])
@@ -342,11 +361,15 @@
 
              [else (error 'analyze "Uncaught case ~a~%" ς̃₂)])
        (analyze)])))
-
+#|
 (define esop (call-with-input-string (format "(~a)" (call-with-input-file "esop.sch" port->string)) read))
 (define esop* (translate-top esop))
 esop*
 (newline)
 (GCFA2 esop*)
+|#
+(define t (translate '((λ (x) (x x)) (λ (y) (y y)))))
+(define t2 (translate '(let loop ([n 0]) (loop (+ n 1)))))
+(GCFA2 t2)
 #;(define I (term (inject ,(escape-analysis! esop* coloring #:annotate-static-depth? #t #:original-name-ht names))))
 #;(apply-reduction-relation* R-Istack I)
