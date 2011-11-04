@@ -96,7 +96,7 @@
                     (set-box! σnew (term (combine-stores ,(unbox σnew) ((,hloc ,v)))))
                     (term (Heap/Stack ,hloc ,i))]))
       (define ℓs (mapi var->loc (term (x ...)) (term (v ...))))
-      (printf "Coloring: ~a ~a~%" ℓs (unbox σnew))
+      (printf "Coloring: ~a ~a~%" ℓs (prettyfy-ς (unbox σnew)))
       (term (,ℓs ,(unbox σnew))))])
 
 (define R
@@ -156,11 +156,17 @@
   (with-handlers ([exn:fail:redex? (λ _ fail-value)])
     (redex-let language ([pat rhs] ...) body1 body ...)))
 
+(define names (make-parameter #f))
+(define (prettyfy-ς ς) (strip-annotation ς (names)))
 (define (inject e)
   (Stack? (make-hasheq))
+  (names (make-hasheq))
   (monovariance (make-hasheq))
   (var-count 0)
-  (define annotated-e (escape-analysis! e (Stack?) #f))
+  (define annotated-e
+    (escape-analysis! e (Stack?)
+                      #:annotate-static-depth? #f
+                      #:original-name-ht (names)))
   (term (,annotated-e () () (()) halt)))
 
 (define (CFA2 e)
@@ -169,6 +175,9 @@
   (define (succ ς̃) (apply-reduction-relation R ς̃))
   (define (insert! k . hts) (for ([ht (in-list hts)]) (hash-set! ht k #t)))
   (define (Seen? pair) (hash-has-key? Seen pair))
+  (define (prettyfy-ς̃ ς)
+    (cond [(equal? ς I) 'I]
+          [else (prettyfy-ς ς)]))
   ;; Summary : entry ↦ setof exit
   ;; Seen/Work : (list state state) ↦ #t
   ;; Callers/TCallers : entry ↦ (list caller entry)
@@ -176,10 +185,10 @@
   (define-values (Summary Seen Callers TCallers) (values (make-hash) (make-hash) (make-hash) (make-hash)))
   (define-values (Final Work) (values (make-hasheq) (make-hasheq)))
   (define (Update! ς̃₁ ς̃₂ ς̃₃ ς̃₄)
-    (apply printf "Updating ~%〈~a,~% ~a,~% ~a,~% ~a〉~%" (list ς̃₁ ς̃₂ ς̃₃ ς̃₄))
+    (apply printf "Updating ~%〈~a,~% ~a,~% ~a,~% ~a〉~%" (map prettyfy-ς̃ (list ς̃₁ ς̃₂ ς̃₃ ς̃₄)))
     (redex-let/fail CESΞK (void)
-                   ([ς-top-entry ς̃₁]
-                    [(v_n2 σ_2 Ξ_2 (push () (v_2 ...) ρ κ_2)) ς̃₂]
+                   ([ς ς̃₁]
+                    [(v_n2 σ_2 Ξ_2 (push () (v_2 ...) ρ_unused κ_2)) ς̃₂]
                     [(v_n3 σ_3 Ξ_3 (entry (v_3 ...) truncated)) ς̃₃]
                     [(v_n4 σ_4 Ξ_4 (exit κ_4)) ς̃₄])
       (Propagate! ς̃₁ (term (v_n4 σ_4 Ξ_2 κ_2)))))
@@ -187,7 +196,7 @@
     (define pair (list ς̃₁ ς̃₂))
     (unless (Seen? pair) (insert! pair Seen Work)))
   (define (Intermediate! ς̃₁ ς̃₂)
-    (for ([ς̃₃ (in-list (succ ς̃₂))])
+    (for ([ς̃₃ (in-list (succ ς̃₂))]) (printf "  Next ~a~%" (prettyfy-ς̃ ς̃₃))
       (Propagate! ς̃₁ ς̃₃)))
 
   (pretty-print (Stack?)) (newline)
@@ -196,13 +205,13 @@
     (match (set-grab Work)
       [#f (list Summary Final)] ;; done
       [(list ς̃₁ ς̃₂)
-       (apply printf "Processing ~%〈~a,~% ~a〉~%" (list ς̃₁ ς̃₂))
+       (apply printf "~%Processing ~%〈~a,~% ~a〉~%" (map prettyfy-ς̃ (list ς̃₁ ς̃₂)))
        (cond [(is-state? ς-eval ς̃₂) (printf "Eval~%") (Intermediate! ς̃₁ ς̃₂)]
              [(is-state? ς-intermediate-apply ς̃₂)  (printf "Apply~%") (Intermediate! ς̃₁ ς̃₂)]
              [(is-state? ς-entry ς̃₂) (printf "Entry~%") (Intermediate! ς̃₁ ς̃₂)]
 
              [(is-state? ς-call ς̃₂) (printf "Call~%")
-              (for ([ς̃₃ (in-list (succ ς̃₂))])
+              (for ([ς̃₃ (in-list (succ ς̃₂))]) (printf "  Next ~a~%" (prettyfy-ς̃ ς̃₃))
                 (Propagate! ς̃₃ ς̃₃)
                 (insert-caller! Callers (ς̃₁ ς̃₂ ς̃₃))
                 (for-summary Summary (ς̃₃ ς̃₄) (Update! ς̃₁ ς̃₂ ς̃₃ ς̃₄)))]
@@ -216,7 +225,7 @@
                           (for-callers TCallers (ς̃₃ ς̃₄ ς̃₁) (Propagate! ς̃₃ ς̃₂))])]
 
              [(is-state? ς-exit-tc ς̃₂) (printf "Tail Call~%")
-              (for ([ς̃₃ (in-list (succ ς̃₂))])
+              (for ([ς̃₃ (in-list (succ ς̃₂))]) (printf "  Next ~a~%" (prettyfy-ς̃ ς̃₃))
                 (Propagate! ς̃₃ ς̃₃)
                 (insert-caller! TCallers (ς̃₁ ς̃₂ ς̃₃))
                 (for-summary Summary (ς̃₃ ς̃₄) (Propagate! ς̃₁ ς̃₄)))]
@@ -237,8 +246,8 @@
 (define t3 (translate '(let* ([n1 1]
                               [n2 2])
                          (+ n1 n2))))
-t2
+t
 (newline)
-(CFA2 t2)
+(CFA2 t)
 ;(apply-reduction-relation* R (inject t))
 ; (define ς (inject t))

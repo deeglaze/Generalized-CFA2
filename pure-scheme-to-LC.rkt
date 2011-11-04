@@ -1,6 +1,6 @@
 #lang racket
 
-(provide translate)
+(provide translate translate-top)
 
 (define scheme-arity-table
   '((false . 0)
@@ -11,8 +11,9 @@
 (define scheme-constructors (map car scheme-arity-table))
 (define (value? v)
   (or (boolean? v)
-      (exact-nonnegative-integer? v)
-      (null? v)))
+      (integer? v)
+      (eq? v 'null)
+      (eq? v 'void)))
 (define (lgensym lst) (for/list ([s (in-list lst)]) (gensym s)))
 (define (lvgensym lst) (apply values (lgensym lst)))
 (define (ngensym n [tag 'g])
@@ -102,42 +103,76 @@
   (define enc-nums (map get-num encs))
   `(,(scott-encode-constructor 'nat) (,op ,@enc-nums)))
 
+(define (arity-of t)
+  (match t
+    [`(λ ,xs ,e) (length xs)]
+    [_ #f]))
+
+(struct rec-bnd (fn body))
+(struct let-bnd (x e))
+(define (translate-top p)
+  (define-values (revdefs revexprs)
+    (for/fold ([defs '()] [exprs '()])
+        ([form (in-list p)])
+      (match form
+        [`(define (,fn ,args ...) ,body)
+         (values (cons (rec-bnd fn `(λ ,args ,body))  defs) exprs)]
+        [`(define ,x ,e)
+         (values (cons (let-bnd x e) defs) exprs)]
+        [expr (values defs (cons expr exprs))])))
+  (translate
+   (for/fold ([form `(list ,@(reverse revexprs))])
+       ([bnd (in-list revdefs)])
+     (match bnd
+       [(rec-bnd fn body)
+        `(letrec* ([,fn ,body]) ,form)]
+       [(let-bnd x e)
+        `(let ([,x ,e]) ,form)]))))
+
 (define (translate t)
   (match t
     [`(λ (,xs ...) ,expr) `(λ ,xs ,(translate expr))]
+    [`(lambda (,xs ...) ,expr) `(λ ,xs ,(translate expr))]
+    [`qwote (error 'translate-qwote)]
     [(? symbol? x) x]
-    [(? integer? x) x]
-    [(? value? v) (scott-encode-scheme-value v)]
-    [`(if ,e₀ ,e₁ ,e₂)
-     (define then (gensym))
-     (translate `(let ((,then (λ () ,(translate e₁))))
-                   (,(translate e₀)
-                    (λ () ,(translate e₂)) ;; false
-                    ;; true nat cons null
-                    ,then ,then ,then ,then)))]
+    [(? null?) `(qwote null)]
+    [(? void?) `(qwote void)]
+    [(? value? v) `(qwote ,v)]
     [`(let ((,xs ,es) ...) ,body)
      `((λ ,xs ,(translate body)) ,@(map translate es))]
+    [`(let* ((,xs ,es) ...) ,body)
+     (translate (for/fold ([term body])
+                    ([x (in-list (reverse xs))]
+                     [e (in-list (reverse es))])
+                  `(let ([,x ,e]) ,term)))]
+    [`(letrec* () ,body) (translate body)]
+    [`(letrec* ((,x ,e) (,xs ,es) ...) ,body)
+     (translate `(let ((,x (,(y-combinator (arity-of e)) (λ (,x) ,e))))
+                   (letrec* ,(map list xs es) ,body)))]
     [`(let ,name ((,xs ,es) ...) ,body)
      (translate `((fixpoint ,(length xs) (λ (,name) (λ ,xs ,body)))
                   ,@es))]
-    ;; one level up so we can compare numbers in the CEK machine
-    [`(if-zero ,e₀ ,e₁ ,e₂)
-     `(if-zero ,(translate e₀) ,(translate e₁) ,(translate e₂))]
-    [`(+ ,e₀ ,e₁) `(+ ,(translate e₀) ,(translate e₁))
-     ;(num-op church-encoded-plus (translate e₀) (translate e₁))
-     ]
-    [`(* ,e₀ ,e₁) `(* ,(translate e₀) ,(translate e₁))
-     ;(num-op church-encoded-mult (translate e₀) (translate e₁))
-     ]
-    [`(sub1 ,e) `(- ,(translate e) 1)
-     ;(num-op church-encoded-pred (translate e))
-     ]
-    [`(cons ,e₀ ,e₁)
-     `(,(scott-encode-constructor 'cons) ,(translate e₀) ,(translate e₁))]
-    [`(car ,e) (destruct (translate e) 'cons 0)]
-    [`(cdr ,e) (destruct (translate e) 'cons 1)]
-    [`(zero? ,e) `(,church-encoded-zero? ,(get-num (translate e)))]
+    [`(list) `(qwote null)]
+    [`(list ,e ,es ...)
+     `(cons ,(translate e) ,(translate `(list . ,es)))]
     [`(fixpoint ,n ,e) `(,(y-combinator n) ,(translate e))]
+    [`(cadr ,e) `(car (cdr ,(translate e)))]
+    [`(caddr ,e) `(car (cdr (cdr ,(translate e))))]
+    [`(cadddr ,e) `(car (cdr (cdr (cdr ,(translate e)))))]
+    [`(cdar ,e) `(cdr (car ,(translate e)))]
+    ;; some macros
+    [`(or) `(qwote #f)]
+    [`(or ,e ,es ...)
+     (define x (gensym))
+     (translate `(let ((,x ,e)) (if ,x ,x (or . ,es))))]
+    [`(and) `(qwote #t)]
+    [`(and ,e ,es ...) (translate `(if ,e (and . ,es) #f))]
+    [`(cond) `(qwote void)]
+    [`(cond [else ,rhs]) (translate rhs)]
+    [`(cond [,lhs ,rhs] ,rest ...)
+     (translate `(if ,lhs ,rhs (cond . ,rest)))]
+    [`(quote ,c) (translate c)]
+    ;; application
     [`(,e ,es ...) `(,(translate e) ,@(map translate es))]
     [_ (error 'translate "match-error ~a" t)]))
 
