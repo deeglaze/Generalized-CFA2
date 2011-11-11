@@ -60,8 +60,8 @@
   [ρ ((x ℓ) ...)]
   [σ ((any d) ...)]
   [(D Ξ) (ξ ...)] ;; stacks are lists of stack frames
-  [ξ (d ...)] ;; stack frames are referenced positionally
-  [ℓ (Stack natural) (Heap/Stack any natural)]
+  [ξ ((x d) ...)] ;; stack frames are referenced positionally
+  [ℓ Stack (Heap any)]
   ;; give names to certain configurations for understandable metafunctions
   [conf-kont (Ξ-kont clam ρ) halt]
   [ς-call (ucall ρ σ Ξ D)]
@@ -97,6 +97,13 @@
       (dict-set ret k vs))])
 
 (define-metafunction DCPS-machine
+  [(combine-frames ξ_1 ξ_2)
+   ,(for/fold ([ret (term ξ_1)])
+        ([(k vs) (in-dict (term ξ_2))])
+      (dict-set ret k vs))])
+
+
+(define-metafunction DCPS-machine
   [(env-lookup ρ x) ,(first (dict-ref (term ρ) (term x)))])
 (define-metafunction DCPS-machine
   [(display-lookup D scope-depth) ,(list-ref (term D) (term scope-depth))])
@@ -116,25 +123,22 @@
   [(Ξ-push ξ (ξ_stack ...)) (ξ ξ_stack ...)])
 
 (define-metafunction DCPS-machine
-  [(Ξ-update (Stack natural) d (ξ_top ξ ...))
-   (,(list-update (term ξ_top) (term natural) (term d)) ξ ...)]
-  [(Ξ-update (Heap/Stack any natural) d (ξ_top ξ ...))
-   (,(list-update (term ξ_top) (term natural) (term d)) ξ ...)])
+  [(Ξ-update x d (ξ_top ξ ...))
+   (,(dict-set (term ξ_top) (term x) (term (d))) ξ ...)])
 
 (define-metafunction DCPS-machine
   [(depth-of lab k)
    ,(hash-ref (call-label-info-depth-ht (hash-ref label-ht (term lab))) (term k))])
 
 (define-metafunction DCPS-machine
-  [(Ξ-lookup (Heap/Stack natural_h natural_s) (ξ ξ_rest ...)) ,(list-ref (term ξ) (term natural_s))]
-  [(Ξ-lookup (Stack natural_s) (ξ ξ_rest ...))                ,(list-ref (term ξ) (term natural_s))])
+  [(Ξ-lookup x (ξ ξ_rest ...)) ,(first (dict-ref (term ξ) (term x)))])
 (define-metafunction DCPS-machine
-  [(D-lookup k ρ lab D) (Ξ-lookup (env-lookup ρ k) ((display-lookup D (depth-of lab k))))])
+  [(D-lookup k ρ lab D) (Ξ-lookup k ((display-lookup D (depth-of lab k))))])
 (define-metafunction DCPS-machine
-  [(σ-lookup (Heap/Stack natural_h natural_s) σ) ,(first (dict-ref (term σ) (term natural_h)))])
+  [(σ-lookup (Heap natural_h) σ) ,(first (dict-ref (term σ) (term natural_h)))])
 (define-metafunction DCPS-machine
-  [(ℓ-lookup σ ξ #t ℓ) (Ξ-lookup ℓ (ξ))]
-  [(ℓ-lookup σ ξ #f ℓ) (σ-lookup ℓ σ)])
+  [(ℓ-lookup σ ξ #t ρ u) (Ξ-lookup u (ξ))]
+  [(ℓ-lookup σ ξ #f ρ u) (σ-lookup (env-lookup ρ u) σ)])
 
 (define-metafunction DCPS-machine
   [(Au ulab u ρ σ D)
@@ -144,7 +148,7 @@
       (cond [depth
              (term (ℓ-lookup σ (display-lookup D ,depth)
                              ,(begin (printf "Escaping ~a ~a~%" (term u) S?) S?)
-                             (env-lookup ρ u)))]
+                             ρ u))]
             [else (unless (set-member? prims (term u))
                     (error 'Au "non-primitive ~a" (term u)))
                   (term (u))]))] ;; primop
@@ -167,35 +171,34 @@
 (define-metafunction DCPS-machine
   [(pop/rebind-necessarily ulab k    uaexp v ρ Ξ D) (pop/restore-display ulab k Ξ D)]
   [(pop/rebind-necessarily ulab clam ulam  v ρ Ξ D) (Ξ D)]
+  [(pop/rebind-necessarily ulab clam prim  v ρ Ξ D) (Ξ D)]
   [(pop/rebind-necessarily ulab halt uaexp v ρ Ξ D) (Ξ D)]
   [(pop/rebind-necessarily ulab clam u     v ρ Ξ D)
    ,(match-let* ([(call-label-info stack-ht depth-ht) (hash-ref label-ht (term ulab))]
                  [S? (hash-ref stack-ht (term u))]
                  [depth (hash-ref depth-ht (term u))])
-      (cond [S? (term-let ([(ξ_top ξ ...) (term (Ξ-update (env-lookup ρ u) (v) Ξ))])
+      (cond [S? (term-let ([(ξ_top ξ ...) (term (Ξ-update u (v) Ξ))])
                   (term ((ξ_top ξ ...) (update-display D ,depth ξ_top))))]
             [else (term (Ξ D))]))])
 
-(define ((var->loc ς j σnew σlocs) i x v)
-        (cond [(in-stack? x) (term (Stack ,(+ i j)))]
+(define ((var->loc ς σnew σlocs) i x v)
+        (cond [(in-stack? x) (term Stack)]
               [else (define hloc (term (alloc ,ς ,(unbox σlocs))))
                     (set-box! σlocs (cons hloc (unbox σlocs)))
                     (set-box! σnew (term (combine-stores ,(unbox σnew) ((,hloc ,v)))))
-                    (term (Heap/Stack ,hloc ,(+ i j)))]))
+                    (term (Heap ,hloc))]))
 
 (define-metafunction DCPS-machine
   [(color-user ς bool_extend natural_depth (u ..._i) (d ..._i) ρ σ (ξ_top ξ ...) D)
    ,(let* ([σnew (box '())]
            [σlocs (box '())]
            [extend? (term bool_extend)]
-           [j (cond [extend? (length (term ξ_top))]
-                    [else 0])]
-           [ξ_next (cond [extend? (append (term ξ_top) (term (d ...)))]
-                         [else (term (d ...))])]
+           [ξ_next (cond [extend? (term (combine-frames ξ_top ((u d) ...)))]
+                         [else (term ((u d) ...))])]
            [Ξ_next (cond [extend? (term (,ξ_next ξ ...))]
                          [else (term (,ξ_next ξ_top ξ ...))])])
       (term ((env-extend* ρ (u ...)
-                          ,(mapi (var->loc (term ς) j σnew σlocs)
+                          ,(mapi (var->loc (term ς) σnew σlocs)
                                  (term (u ...)) (term (d ...))))
              ,(unbox σnew) ,Ξ_next
              (update-display D natural_depth ,ξ_next) ,(unbox σlocs))))])
@@ -207,16 +210,15 @@
     (combine-stores σ_1 σ_new)
     (ξ_top ξ_rest ...)
     (update-display D_1 natural_depth ξ_top))
-   (where natural_ξloc ,(length (term (u ...))))
-   (where (ξ_top ξ_rest ...) (Ξ-update (Stack natural_ξloc) (conf-kont) Ξ_1))
+   (where (ξ_top ξ_rest ...) (Ξ-update k (conf-kont) Ξ_1))
    (where (ℓ σ_new)
-          ,(cond [(in-stack? (term k)) (term ((Stack natural_ξloc) ()))]
+          ,(cond [(in-stack? (term k)) (term (Stack ()))]
                  [else (define hloc (term (alloc ς any)))
                        (define c
                          (cond [(eq? (term conf-kont) 'halt) 'halt]
                                [else (redex-let DCPS-machine ([(Ξ-kont clam ρ_c) (term conf-kont)])
                                        (term (σ-kont clam ρ_c Ξ D)))]))
-                       (term ((Heap/Stack ,hloc natural_ξloc)
+                       (term ((Heap ,hloc)
                               ((,hloc (,c)))))]))])
 
 (define-metafunction DCPS-machine
@@ -240,17 +242,19 @@
                 (take-branch (Au ulab u ρ σ D) exp_1 exp_2))]
     ;; user apply (primop)
     [--> ((user-exp ulab (primop uaexp ... caexp)) ρ σ Ξ D)
-         (conf-kont ((δ primop d ...)) σ Ξ D)
+         (conf-kont ((δ primop d ...)) σ Ξ_1 D_1)
          (where (conf-kont) (Ak ulab caexp ρ D))
-         (where (d ...) ((Au ulab uaexp ρ σ D) ...))]
+         (where (d ...) ((Au ulab uaexp ρ σ D) ...))
+         (where (Ξ_1 D_1) (pop/rebind-necessarily ulab caexp primop primop ρ Ξ D))]
     ;; user apply (alloc-primop)
     [--> (name ς ((user-exp ulab (alloc-primop uaexp ... caexp)) ρ σ Ξ D))
          ;; XXX: probably wrong
-         (conf-kont (d_res) (combine-stores σ ((any_hloc d_res))) Ξ D)
+         (conf-kont (d_res) (combine-stores σ ((any_hloc d_res))) Ξ_1 D_1)
          (where (conf-kont) (Ak ulab caexp ρ D))
          (where any_hloc (alloc ς ()))
          (where (d ...) ((Au ulab uaexp ρ σ D) ...))
-         (where d_res (δ alloc-primop d ...))]
+         (where d_res (δ alloc-primop d ...))
+         (where (Ξ_1 D_1) (pop/rebind-necessarily ulab caexp alloc-primop alloc-primop ρ Ξ D))]
     ;; user apply (entry)
     [--> (name ς ((clo (λ ulab (u ... k) exp) ρ) (d ..._i) conf-kont σ Ξ D))
          (exp ρ_2 (combine-stores σ_comb σ_new2) Ξ_2 D_2)
@@ -259,7 +263,8 @@
                 (color-user ς #f natural_depth (u ...) (d ...) ρ σ Ξ D))
          (where σ_comb (combine-stores σ σ_new))
          (where (ρ_2 σ_new2 Ξ_2 D_2)
-                (color-cont ς natural_depth ρ_1 σ_comb Ξ_1 D_1 σlocs))]
+                (color-cont ς natural_depth ρ_1 σ_comb Ξ_1 D_1 σlocs))
+         (side-condition (printf "##Entry##~%"))]
     ;; continuation apply (capply)
     [--> (name ς ((Ξ-kont (κ clab (u ..._i) exp) ρ) (d ..._i) σ Ξ D))
          (exp ρ_1 (combine-stores σ σ_new) Ξ_1 D_1)
@@ -469,7 +474,7 @@
         (printf "Step: ~a~%" i)
         (pretty-print t*) (newline)
         (loop (sub1 n) (add1 i) t*)))))
-(apply-reduction-relation-n R-DCPS-machine 85 I)
+(apply-reduction-relation* R-DCPS-machine I)
 ;(traces R-DCPS-machine I)
 
 
