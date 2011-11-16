@@ -80,7 +80,7 @@
   [(clab ulab lab scope-depth) natural])
 
 (define-extended-language DCPS-machine Annotated-CPS-Scheme
-  [ς ς-eval ς-entry ς-capply]
+  [ς ς-eval ς-entry ς-capply ς-final]
   [ς-eval (exp ρ σ Ξ D)]
   [ς-capply ((Ξ-kont clam ρ) (d ...) σ Ξ D)]
   [ς-colorable ς-capply ς-entry]
@@ -219,7 +219,8 @@
    (where (ξ_top ξ_rest ...) (Ξ-pop Ξ))])
 
 ;; for concrete semantics
-#;(define-metafunction DCPS-machine
+#|
+ (define-metafunction DCPS-machine
   [(pop/rebind-necessarily ulab k    uaexp v ρ Ξ D) (pop/restore-display ulab k Ξ D)]
   [(pop/rebind-necessarily ulab clam ulam  v ρ Ξ D) (Ξ D)]
   [(pop/rebind-necessarily ulab clam prim  v ρ Ξ D) (Ξ D)]
@@ -231,6 +232,7 @@
       (cond [S? (term-let ([(ξ_top ξ ...) (term (Ξ-update u (v) Ξ))])
                   (term ((ξ_top ξ ...) (update-display D ,depth ξ_top))))]
             [else (term (Ξ D))]))])
+|#
 ;; for local semantics
 (define-metafunction DCPS-machine
   [(pop/rebind-necessarily ulab any_0 any_1 any_2 any_3 Ξ D) (Ξ D)])
@@ -358,8 +360,9 @@
 
 ;; Dress up the data manipulation to look more like the math.
 (define-syntax-rule (for-callers Callers (ς̃entry ς̃call ς̃callee-entry) body1 body ...)
-  (for ([(ς̃entry caller×callee) (in-hash Callers)]
-        #:when (equal? ς̃callee-entry (second caller×callee)))
+  (for* ([(ς̃entry caller×callees) (in-hash Callers)]
+         [caller×callee (in-set caller×callees)]
+         #:when (equal? ς̃callee-entry (second caller×callee)))
     (let ([ς̃call (first caller×callee)])
       body1 body ...)))
 (define-syntax-rule (for-summary Summary (ς̃entry ς̃exit) body1 body ...)
@@ -377,23 +380,23 @@
      (for ([(ςexit _) (in-hash Escapes)]
            #:when (ς-calls-k? ςexit (term k)))
        body1 body ...)]))
-#;
 (define-syntax for-active-paths
   (syntax-rules (over binds calls)
-    [(_ Callers TCallers (ςentry (ςcall over k) ςcallee-entry) body1 body ...)
-     (let ([W (make-hash)])
-       (let loop ([callee-entry ςcallee-entry])
-         (cond [(ς-over-k? ςcall (term k))
-                body1 body ...]
-               [else
-                (for-callers Callers (ςentry ςcall callee-entry)
-                  (μ-guard (list ςentry ςcall callee-entry) W (loop ςentry)))
-                (for-callers TCallers (ςentry ςcall callee-entry)
-                  (μ-guard (list ςentry ςcall callee-entry) W (loop ςentry)))])))]))
+    [(_ Net (ςentry (ςcall over k) ςcallee-entry) body1 body ...)
+     (let loop ([top-entry #f]
+                [top-call #f]
+                [callee-entry ςcallee-entry])
+       (cond [(and top-entry top-call (ς-over-k? ςcall (term k)))
+              (let ([ςentry top-entry]
+                    [ςcall top-call])
+                body1 body ...)]
+             [else
+              (for-callers Callers (ςentry ςcall callee-entry)
+                (loop ςentry ςcall ςentry))]))]))
 (define-syntax-rule (insert-caller! Callers (ς̃entry ς̃call ς̃callee-entry))
-  (hash-set! Callers ς̃entry (list ς̃call ς̃callee-entry)))
+  (hash-set-add! Callers ς̃entry (list ς̃call ς̃callee-entry)))
 (define-syntax-rule (add-summary! Summary (ς̃entry ς̃exit))
-  (hash-set! Summary ς̃entry (set-add (hash-ref Summary ς̃entry (set)) ς̃exit)))
+  (hash-set-add! Summary ς̃entry ς̃exit))
 (define-syntax-rule (μ-guard e W body1 body ...)
   (let ([x e])
     (unless (hash-has-key? W e)
@@ -401,6 +404,70 @@
       body1 body ...)))
 
 (define (insert! k . hts) (for ([ht (in-list hts)]) (hash-set! ht k #t)))
+(define (hash-set-add! ht k v)
+  (hash-set! ht k (set-add (hash-ref ht k (set)) v)))
+(define (hash-set-union! ht k v)
+  (hash-set! ht k (set-union (hash-ref ht k (set)) v)))
+
+(define (fv-σ-touch fvs ρ)
+  (for*/set ([fv fvs]
+             [ℓ (in-value (dict-ref ρ fv))]
+             #:unless (eq? ℓ 'Stack))
+    ℓ))
+
+(define (𝒯 v)
+  ((term-match/single DCPS-machine
+     ;; values
+     [halt (set)]
+     [c (set)]
+     [prim (set)]
+     [(clo ulam ρ) (fv-σ-touch (free-vars ulam) (term ρ))]
+     [(Ξ-kont clam ρ) (fv-σ-touch (free-vars clam) (term ρ))]
+     [(σ-kont clam ρ Ξ D) (fv-σ-touch (free-vars clam) (term ρ))]
+     [(cons-cell v_0 v_1)
+      (set-union (𝒯 (term v_0)) (𝒯 (term v_1)))]
+     ;; configurations
+     [(exp ρ σ Ξ D) (fv-σ-touch (free-vars exp) (term ρ))]
+     [((Ξ-kont clam ρ) (d ...) σ Ξ D)
+      (for/fold ([ret (𝒯 (term (Ξ-kont clam ρ)))])
+          ([d₀ (term (d ...))])
+        (set-union (𝒯 d₀) ret))]
+     [((clo ulam ρ) (d ...) conf-kont σ Ξ D)
+      (for/fold ([ret (𝒯 (term (clo ulam ρ)))])
+          ([d₀ (term (d ...))])
+        (set-union (𝒯 d₀) ret))])
+   v))
+;; take a heap location and return all locations touched by that location
+(define (↝σ ℓ σ)
+  (match-define `(Heap ,hloc) ℓ)
+  (for/fold ([touched (set)])
+      ([v (in-list (first (dict-ref σ hloc)))])
+    (set-union touched (𝒯 v))))
+
+(define (ℛ ς)
+  (define (↝σ* ℓ σ)
+    (define W (make-hash))
+    (let loop ([ℓ ℓ])
+      (cond [(hash-has-key? W ℓ) (set)]
+            [else
+             (hash-set! W ℓ #t)
+             (for*/fold ([reached (set)])
+                 ([touched (in-value (↝σ ℓ σ))]
+                  [touched-ℓ (in-set touched)])
+               (set-union reached touched
+                          (loop touched-ℓ)))])))
+  (define σ
+    ((term-match/single DCPS-machine
+     [(exp ρ σ Ξ D) (term σ)]
+     [((Ξ-kont clam ρ) (d ...) σ Ξ D) (term σ)]
+     [(halt (d ...) σ Ξ D) (term σ)]
+     [((clo ulam ρ) (d ...) conf-kont σ Ξ D) (term σ)])
+   ς))
+  (define roots (𝒯 ς))
+  ;; collect the reaching locations of each touched location in the given state
+  (for/fold ([reached roots])
+      ([ℓ (in-set roots)])
+    (set-union reached (↝σ* ℓ σ))))
 
 (define (GCFA2 e [tr translate])
   (define I (inject e tr))
@@ -410,14 +477,14 @@
   (define (Seen? pair) (hash-has-key? Seen pair))
   (define (in-Summary? ς̃₁ ς̃₂) (set-member? (hash-ref Summary ς̃₁ '()) ς̃₂))
   (define (name-ς ς) (strip-annotation ς names))
-  (define (add-summaries! S)
-    (for ([(entry exits) (in-hash S)])
-      (hash-set! Summary entry (set-union (hash-ref Summary entry (set)) exits))))
+  (define (hash-union! S A)
+    (for ([(entry exits) (in-hash A)])
+      (hash-set-union! S entry exits)))
   ;; Summary : entry ↦ setof exit
   ;; Seen/Work : (list state state) ↦ #t
   ;; Callers/TCallers : entry ↦ (list caller entry)
   ;; Final : state ↦ #t
-  (define-values (Summary ΞSummary Seen Callers TCallers EntriesEsc Escapes)
+  (define-values (Summary Seen Net TCallers EntriesEsc Escapes)
     (apply values (build-list 7 (λ _ (make-hash)))))
   (define-values (Final Work) (values (make-hasheq) (make-hasheq)))
   (define (Update! ς̃₁ ς̃₂ ς̃₃ ς̃₄)
@@ -461,37 +528,33 @@
           [ς-call
            (for ([ς̃₃ (in-list (succ ς̃₂))])
              (Propagate! ς̃₃ ς̃₃ #f)
-             (insert-caller! Callers (ς̃₁ ς̃₂ ς̃₃))
+             (insert-caller! Net (ς̃₁ ς̃₂ ς̃₃))
              (for-summary Summary (ς̃₃ ς̃₄) (Update! ς̃₁ ς̃₂ ς̃₃ ς̃₄)))]
           [ς-final (insert! ς̃₂ Final)]
           ;; exit-ret/esc/exn
           [((cont-call clab (k uaexp ...)) ρ σ Ξ D)
            (match-define (call-label-info refcolors vdepths ulam-depth)
                          (hash-ref label-ht (term clab)))
-           (define color (dict-ref refcolors (term k) stack-ref))
-           (cond [(and (not (eq? color heap-ref)) (equal? ς̃₁ I))
-                  (insert! ς̃₂ Final)]
-                 [else
-                  (case-alloc color
-                    [local
+           (case-alloc (dict-ref refcolors (term k) stack-ref)
+             [stack
+              (cond [(equal? ς̃₁ I) (insert! ς̃₂ Final)]
+                    [else
+                     (add-summary! Summary (ς̃₁ ς̃₂))
+                     (for-callers TCallers (ς̃₃ ς̃₄ ς̃₁) (Propagate! ς̃₃ ς̃₂ #f))
+                     (let ([N (make-hash)])
+                       (for-active-paths Net (ς̃₃ (ς̃₄ over k) ς̃₁)
+                         (insert-caller! N (ς̃₃ ς̃₄ ς̃₂))
+                         (Update! ς̃₃ ς̃₄ ς̃₁ ς̃₂))
+                       (hash-union! Net N))])]
+             [heap
+              (cond [(not (in-Summary? ς̃₁ ς̃₂))
+                     (insert! ς̃₂ Escapes)
+                     (for-escaping-entries EntriesEsc (ς̃₃ over k) (Propagate! ς̃₁ ς̃₃ #t))]
+                    [(equal? ς̃₁ I) (insert! ς̃₂ Final)]
+                    [else
                      (add-summary! Summary (ς̃₁ ς̃₂))
                      (for-callers Callers (ς̃₃ ς̃₄ ς̃₁) (Update! ς̃₃ ς̃₄ ς̃₁ ς̃₂))
-                     (for-callers TCallers (ς̃₃ ς̃₄ ς̃₁) (Propagate! ς̃₃ ς̃₂ #f))]
-                    [exn
-                     (cond [(not (in-Summary? ς̃₁ ς̃₂)) ;; not a regular summary edge.
-                            (for-active-paths Callers TCallers (ς̃exn-ctx (ς̃exn over k) ς̃₂)
-                              (Update! ς̃exn-ctx ς̃exn ς̃₁ ς̃₂))]
-                           [(equal? ς̃₁ I) (insert! ς̃₂ Final)]
-                           [else])]
-                    [heap
-                     (cond [(not (in-Summary? ς̃₁ ς̃₂))
-                            (insert! ς̃₂ Escapes)
-                            (for-escaping-entries EntriesEsc (ς̃₃ over k) (Propagate! ς̃₁ ς̃₃ #t))]
-                           [(equal? ς̃₁ I) (insert! ς̃₂ Final)]
-                           [else
-                            (add-summary! Summary (ς̃₁ ς̃₂))
-                            (for-callers Callers (ς̃₃ ς̃₄ ς̃₁) (Update! ς̃₃ ς̃₄ ς̃₁ ς̃₂))
-                            (for-callers TCallers (ς̃₃ ς̃₄ ς̃₁) (Propagate! ς̃₃ ς̃₂ #t))])])])]
+                     (for-callers TCallers (ς̃₃ ς̃₄ ς̃₁) (Propagate! ς̃₃ ς̃₂ #t))])])]
           ;; tail call
           [ς-exit-tc
            (printf "Tail call~%")
@@ -502,7 +565,7 @@
                (for-summary Summary (ς̃₃ ς̃₄)
                  (add-summary! S (ς̃₁ ς̃₄))
                  (Propagate! ς̃₁ ς̃₄ #f))
-               (add-summaries! S)))]
+               (hash-union! Summary S)))]
 
           [any (error 'analyze "Uncaught case ~a~%" ς̃₂)])
         ς̃₂)
