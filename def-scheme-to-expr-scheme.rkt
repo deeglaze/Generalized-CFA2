@@ -145,10 +145,11 @@
                     ([x (in-list (reverse xs))]
                      [e (in-list (reverse es))])
                   `(let ([,x ,e]) ,term)))]
-    [`(letrec* () ,body) (translate body)]
-    [`(letrec* ((,x ,e) (,xs ,es) ...) ,body)
-     (translate `(let ((,x (,(y-combinator (arity-of e)) (λ (,x) ,e))))
-                   (letrec* ,(map list xs es) ,body)))]
+    [`(letrec* ((,xs ,es) ...) ,body)
+     (translate (for/fold ([term body])
+                    ([x (in-list (reverse xs))]
+                     [e (in-list (reverse es))])
+                  `(let ([,x (,(y-combinator (arity-of e)) (λ (,x) ,e))]) ,term)))]
     [`(let ,name ((,xs ,es) ...) ,body)
      (translate `((fixpoint ,(length xs) (λ (,name) (λ ,xs ,body)))
                   ,@es))]

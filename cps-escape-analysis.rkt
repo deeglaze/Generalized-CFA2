@@ -1,9 +1,17 @@
 #lang racket
 
 (provide escape-analysis! strip-annotation
-         (struct-out call-label-info))
+         (struct-out call-label-info)
+         (struct-out alloc-depth)
+         get-depth get-color
+         stack-ref heap-ref exn-ref)
 
-(struct call-label-info (stack-ht depth-ht) #:transparent)
+;; The different colors for references.
+(struct *stack-ref ()) (define stack-ref (*stack-ref))
+(struct *heap-ref ()) (define heap-ref (*heap-ref))
+(struct *exn-ref ()) (define exn-ref (*exn-ref))
+(struct alloc-depth ([color #:mutable] depth))
+(struct call-label-info (refcolors ulam-depth) #:transparent)
 
 (define (value? c) (or (boolean? c) (integer? c) (eq? c 'null) (eq? c 'void)))
 (define (freshen xs ρ original-name-ht)
@@ -12,6 +20,19 @@
     (when original-name-ht
       (dict-set! original-name-ht y x))
     (values (cons y xs*) (dict-set ρ x y))))
+
+;; change the color entry for a variable, but not the nesting depth.
+(define (update-color! color-ht var color)
+  (define alloc (hash-ref color-ht var #f))
+  (when alloc (set-alloc-depth-color! alloc color)))
+
+(define (get-depth color-ht var)
+  (define alloc (hash-ref color-ht var #f))
+  (and alloc (alloc-depth-depth alloc)))
+(define (get-color color-ht var)
+  (define alloc (hash-ref color-ht var #f))
+  (cond [alloc (alloc-depth-color alloc)]
+        [else stack-ref]))
 
 ;; freshen binders, label lambdas with their static nesting depth, and label
 ;; references with the static nesting depth of their binding lambda along with
@@ -22,24 +43,22 @@
   (define (next-label!) (begin0 (unbox label) (set-box! label (add1 (unbox label)))))
   (let loop ([e e]
              [depth 0]
-             [depths #hasheq()]
              [ρ #hasheq()]
              [ulam-depth 0]
              [label-of-discourse 0])
-    (define (conv e) (loop e depth depths ρ ulam-depth label-of-discourse))
-    (define (set-depths xs v)
-      (for/fold ([ret depths]) ([x (in-list xs)]) (hash-set ret x v)))
+    (define (conv e) (loop e depth ρ ulam-depth label-of-discourse))
+    (define (initial-alloc! xs v)
+      (for ([x (in-list xs)])
+        (hash-set! color-ht x (alloc-depth stack-ref v))))
     (define (populate-label! label kind args)
       (define (var->no-esc?)
-        (define depth-ht (make-hasheq))
         (values (for/hasheq ([exp (in-list args)]
                              #:when (symbol? exp))
-                  (define exp-depth (dict-ref depths exp #f))
+                  (define exp-depth (get-depth color-ht exp))
                   (define no-esc? (or (not exp-depth) (= exp-depth ulam-depth)))
-                  (unless no-esc? (hash-set! color-ht exp #f))
-                  (hash-set! depth-ht exp exp-depth)
+                  (unless no-esc? (update-color! color-ht exp heap-ref))
                   (values exp no-esc?))
-                depth-ht))
+                ulam-depth))
       (case kind
         [(λ) (hash-set! label-ht label depth)]
         [(κ) (hash-set! label-ht label ulam-depth)]
@@ -50,23 +69,25 @@
       [`(λ ,xs ,e) ;; user lambda
        (define-values (xs* ρ*) (freshen xs ρ original-name-ht))
        (define ℓ (next-label!))
-       (define call (loop e (add1 depth) (set-depths xs* depth) ρ* depth ℓ))
+       (initial-alloc! xs* depth)
+       (define call (loop e (add1 depth) ρ* depth ℓ))
        (populate-label! ℓ 'λ call)
        `(λ ,ℓ ,(reverse xs*) ,call)]
       [`(κ ,xs ,e) ;; continuation lambda
        (define-values (xs* ρ*) (freshen xs ρ original-name-ht))
        (define γ (next-label!))
-       (define call (loop e depth (set-depths xs* ulam-depth) ρ* ulam-depth γ))
+       (initial-alloc! xs* ulam-depth)
+       (define call (loop e depth ρ* ulam-depth γ))
        (populate-label! γ 'κ call)
        `(κ ,γ ,(reverse xs*) ,call)]
-      [`(,(and (or 'user-exp 'cont-call) tag) ,call)
+      [`(,(and (or 'user-exp 'cont-call) tag) ,call) ;; expr wrapper
        (define ψ (next-label!))
-       `(,tag ,ψ ,(loop call depth depths ρ ulam-depth ψ))]
-      [`(if ,u ,e₁ ,e₂)
+       `(,tag ,ψ ,(loop call depth ρ ulam-depth ψ))]
+      [`(if ,u ,e₁ ,e₂) ;; user if
        (define u* (dict-ref ρ u u))
        (populate-label! label-of-discourse 'call (list u*))
        `(if ,u* ,(conv e₁) ,(conv e₂))]
-      [`(,es ...)
+      [`(,es ...) ;; user/continuation call
        (define es* (map conv es))
        (populate-label! label-of-discourse 'call es*)
        es*]
