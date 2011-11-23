@@ -6,8 +6,11 @@
          "expr-scheme-to-CPS.rkt"
          "cps-escape-analysis.rkt"
          "utils.rkt"
-         (for-syntax syntax/id-table))
-(provide (all-defined-out))
+         (for-syntax syntax/parse syntax/id-table))
+(provide (all-defined-out)
+         (for-syntax use-concrete-metafunctions?))
+
+(define-for-syntax use-concrete-metafunctions? #t)
 
 ;; lookup tables for the intermediate representation. Populated by escape analysis.
 (define coloring (make-hasheq))
@@ -23,35 +26,51 @@
 (define (has-exn-ref? x) (eq? exn-ref (get-color coloring x)))
 
 ;; define some identifiers for use as syntactic keywords.
-(define-values-for-syntax (stack local heap exn)
-  (let ([fail (λ (stx) (raise-syntax-error #f "For use only in case-alloc" stx))])
-    (values fail fail fail fail)))
+(define-values (stack local heap exn concrete)
+  (let ([fail (λ (stx) (raise-syntax-error #f "For use only in macros" stx))])
+    (values fail fail fail fail fail)))
 (define-syntax (case-alloc-aux stx)
   (define lut (make-free-id-table (hasheq #'stack #'stack-ref
                                           #'heap #'heap-ref
                                           #'exn #'exn-ref)))
-  (syntax-case stx ()
-    [(_ id) #'(void)]
-    [(_ id [local rhs1 rhs ...] rest ...)
-     #'(cond [(not (eq? id heap-ref)) rhs1 rhs ...]
-             [else (case-alloc-aux id rest ...)])]
-    [(_ id [kind rhs1 rhs ...] rest ...)
+  (syntax-parse stx #:literals (stack local heap exn)
+    [(_ i:id) #'(void)]
+    [(_ i:id [local rhs1:expr rhs:expr ...] rest:expr ...)
+     #'(cond [(not (eq? i heap-ref)) rhs1 rhs ...]
+             [else (case-alloc-aux i rest ...)])]
+    [(_ i:id [kind:id rhs1:expr rhs:expr ...] rest:expr ...)
      (let ([ref (free-id-table-ref lut #'kind)])
        (unless ref (raise-syntax-error #f "expected one of (stack heap exn local)" stx))
-       #`(cond [(eq? id #,ref) rhs1 rhs ...]
-               [else (case-alloc-aux id rest ...)]))]))
+       #`(cond [(eq? i #,ref) rhs1 rhs ...]
+               [else (case-alloc-aux i rest ...)]))]))
+;; abstract out our case analysis on variable coloring to a syntactic form.
 (define-syntax-rule (case-alloc expr [lhs rhs1 rhs ...] ...)
   (let ([x expr])
     (case-alloc-aux x [stack rhs1 rhs ...] ...)))
+
+;; Ergonomic macro to switch back and forth from
+;; local semantics to concrete semantics easily
+(define-syntax (define-abstraction-dependent-metafunctions stx)
+  (define-syntax-class def
+    #:attributes ((defs 1)) #:literals (local concrete)
+    (pattern (concrete cdef1 cdefs:expr ...)
+             #:with (defs ...) (cond [use-concrete-metafunctions? (syntax/loc stx (cdef1 cdefs ...))]
+                                     [else #'()]))
+    (pattern (local ldef1 ldefs:expr ...)
+             #:with (defs ...) (cond [use-concrete-metafunctions? #'()]
+                                     [else  (syntax/loc stx (ldef1 ldefs ...))])))
+  (syntax-parse stx
+    [(_ d:def ...)
+     (syntax/loc stx (begin d.defs ... ...))]))
+
 (define-syntax-rule (!! expr) (not (not expr)))
 
 (define (ψ-is-kind? label v kind)
   (match-define (call-label-info colors ulam-depth) (hash-ref label-ht label))
   (eq? (hash-ref colors v) kind))
-(define (S?ψ label v) (ψ-is-kind? label v stack-ref))
-(define (H?ψ label v) (ψ-is-kind? label v heap-ref))
-(define (E?ψ label v) (ψ-is-kind? label v exn-ref))
-(define (Ξ?ψ label v) (not (ψ-is-kind? label v heap-ref)))
+(define (¬H?ψ label v) (ψ-is-kind? label v #t))
+(define (H?ψ label v) (ψ-is-kind? label v #f))
+
 
 ;; This language isn't used - only extended. Provided f
 (define-language CPS-Scheme
@@ -104,7 +123,7 @@
   [v prim c (void) (clo ulam ρ) continuation (cons-cell v v)]
   [continuation (σ-kont clam ρ Ξ D) (Ξ-kont clam ρ) halt truncated]
   [tail-continuation k halt]
-  [d (v ...)] ;; abstracted via ...
+  [d (v v ...)] ;; abstracted via v ...
   [ρ ((x ℓ) ...)]
   [σ ((any d) ...)]
   [(D Ξ) (ξ ...)] ;; stacks are lists of stack frames. A display is a bounded, indexed list of stack frames.
@@ -121,13 +140,9 @@
   [ς-exit-shape ((cont-call (name lab clab) ((name cont tail-continuation) uaexp ...)) ρ σ Ξ D)
                 ((user-exp (name lab ulab) (prim uaexp ... (name cont tail-continuation))) ρ σ Ξ D)]
   [ς-exit-ret (side-condition ((cont-call (name lab clab) ((name cont tail-continuation) uaexp ...)) ρ σ Ξ D)
-                              (S?ψ (term lab) (term cont)))
+                              (¬H?ψ (term lab) (term cont)))
               (side-condition ((user-exp (name lab ulab) (prim uaexp ... (name cont tail-continuation))) ρ σ Ξ D)
-                              (S?ψ (term lab) (term cont)))]
-  [ς-exit-exn (side-condition ((cont-call (name lab clab) ((name cont tail-continuation) uaexp ...)) ρ σ Ξ D)
-                              (E?ψ (term lab) (term cont)))
-              (side-condition ((user-exp (name lab ulab) (prim uaexp ... (name cont tail-continuation))) ρ σ Ξ D)
-                              (E?ψ (term lab) (term cont)))]
+                              (¬H?ψ (term lab) (term cont)))]
   [ς-exit-esc (side-condition ((cont-call (name lab clab) ((name cont tail-continuation) uaexp ...)) ρ σ Ξ D)
                               (H?ψ (term lab) (term cont)))
               (side-condition ((user-exp (name lab ulab) (prim uaexp ... (name cont tail-continuation))) ρ σ Ξ D)

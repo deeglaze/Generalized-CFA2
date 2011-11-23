@@ -3,7 +3,7 @@
 (provide escape-analysis! strip-annotation
          (struct-out call-label-info)
          (struct-out alloc-depth)
-         get-depth get-color
+         get-depth get-color recolor!
          stack-ref heap-ref exn-ref)
 
 ;; The different colors for references.
@@ -11,7 +11,7 @@
 (struct *heap-ref ()) (define heap-ref (*heap-ref))
 (struct *exn-ref ()) (define exn-ref (*exn-ref))
 (struct alloc-depth ([color #:mutable] depth))
-(struct call-label-info (refcolors ulam-depth) #:transparent)
+(struct call-label-info (refnonheap ulam-depth) #:transparent)
 
 (define (value? c) (or (boolean? c) (integer? c) (eq? c 'null) (eq? c 'void)))
 (define (freshen xs ρ original-name-ht)
@@ -34,6 +34,37 @@
   (cond [alloc (alloc-depth-color alloc)]
         [else stack-ref]))
 
+(define (recolor! color-ht label-ht escaping)
+  (define change? (box #f))
+  (define (escape-color var col)
+    (define var-heap? (hash-has-key? escaping var))
+    (cond [var-heap? heap-ref] ;; we know col must be heap
+          [(eq? col heap-ref)
+           (printf "~a was a heap variable. Proved safe to stack allocate.~%" var)
+           (set-box! change? #t)
+           exn-ref]
+          [else col]))
+  (define (non-heap?->color b)
+    (cond [b stack-ref]
+          [else heap-ref]))
+  ;; Turn heap colors that don't escape into exn colors. (Others stay the same).
+  (hash-for-each color-ht
+                 (λ (var AD)
+                    (set-alloc-depth-color! AD (escape-color var (alloc-depth-color AD)))))
+  ;; Turn heap refs to exn colored vars into exn refs.
+  (hash-for-each label-ht
+                 (λ (label alloc-depth+CLI)
+                    (when (call-label-info? alloc-depth+CLI)
+                      (define refnonheap (call-label-info-refnonheap alloc-depth+CLI))
+                      (hash-for-each
+                       refnonheap
+                       (λ (var non-heap?)
+                          (hash-set! refnonheap var
+                                     (not (eq? heap-ref
+                                               (escape-color var (non-heap?->color non-heap?))))))))))
+  ;; report any color promotions.
+  (unbox change?))
+
 ;; freshen binders, label lambdas with their static nesting depth, and label
 ;; references with the static nesting depth of their binding lambda along with
 ;; the syntactic escaping criterion for whether it counts as a non-escaping reference
@@ -52,13 +83,14 @@
         (hash-set! color-ht x (alloc-depth stack-ref v))))
     (define (populate-label! label kind args)
       (define (var->no-esc?)
-        (values (for/hasheq ([exp (in-list args)]
-                             #:when (symbol? exp))
-                  (define exp-depth (get-depth color-ht exp))
-                  (define no-esc? (or (not exp-depth) (= exp-depth ulam-depth)))
-                  (unless no-esc? (update-color! color-ht exp heap-ref))
-                  (values exp no-esc?))
-                ulam-depth))
+        (define refnonheap (make-hasheq))
+        (for ([exp (in-list args)]
+              #:when (symbol? exp))
+          (define exp-depth (get-depth color-ht exp))
+          (define no-esc? (or (not exp-depth) (= exp-depth ulam-depth)))
+          (unless no-esc? (update-color! color-ht exp heap-ref))
+          (hash-set! refnonheap exp no-esc?))
+        (values refnonheap ulam-depth))
       (case kind
         [(λ) (hash-set! label-ht label depth)]
         [(κ) (hash-set! label-ht label ulam-depth)]
